@@ -1,221 +1,254 @@
 # Comprehensive Diagnosis Report: 500 Errors Analysis
 
-**Date:** January 12, 2026
-**Service:** alumnus_app_17a4
+**Date:** April 15, 2026
+**Service:** `alumnus_app_1d5a`
 **Endpoint:** `/students/db-leaky-connections`
+**Investigation Window:** Last 15 minutes
+**Host:** `vitor` | **Runtime:** Node.js 22.17.1 | **PID:** 25012
 
 ---
 
 ## 1. Metrics Analysis (Prometheus)
 
-**Endpoint Affected:** `/students/db-leaky-connections`
+**Metric:** `http_server_duration_milliseconds_count`
+**Instrumentation:** `@opentelemetry/instrumentation-http` v0.208.0
 
-**Response Time Pattern:**
-- All failed requests consistently take **~1000-1003ms** (exactly 1 second)
-- This indicates a **timeout threshold** being hit
-- Average response time: **1001.3ms** for all 500 errors
+### Request Counts by Status Code
 
-**Error Rate:**
-- Multiple 500 errors detected across 20+ traces
-- Pattern shows consistent failures every 2 seconds
-- 100% of requests to this endpoint are failing
+| HTTP Status   | Request Count (last sample) | Trend                                 |
+| ------------- | --------------------------- | ------------------------------------- |
+| **200 OK**    | **2**                       | Constant — never increases            |
+| **500 Error** | **176**                     | +30 per minute (t-15m: 26 → now: 176) |
+
+### Response Time Analysis
+
+| Status    | Avg Response Time | Observation                            |
+| --------- | ----------------- | -------------------------------------- |
+| 200 OK    | ~50–73 ms         | Normal DB query execution              |
+| 500 Error | **~1008 ms**      | Matches pool timeout threshold exactly |
+
+> **Key signal:** The 200 count is fixed at 2 and never grows. Exactly 2 successful requests — equal to the pool max size. Every request after that hits the timeout wall at ~1 second.
+
+**PromQL used:**
+
+```promql
+http_server_duration_milliseconds_count{http_route="/students/db-leaky-connections"}
+
+http_server_duration_milliseconds_sum{http_route="/students/db-leaky-connections", http_status_code="500"}
+/ http_server_duration_milliseconds_count{http_route="/students/db-leaky-connections", http_status_code="500"}
+```
 
 ---
 
 ## 2. Logs Analysis (Loki)
 
-**Key Error Patterns Found:**
+**Label selector:** `{service_name="alumnus_app_1d5a"}`
+**Severity:** `error` (severity_number: 17)
 
-**Error Message:**
+### Error Message
+
 ```
-"Failed to retrieve students data"
-"Error: timeout exceeded when trying to connect"
+Error processing request
 ```
 
-**Stack Trace Details:**
+### Full Stack Trace (extracted from `err_stack` field)
+
 ```
 Error: timeout exceeded when trying to connect
-    at /Users/erickwendel/Downloads/projetos/ewit/cursos/ia-devs/demos/exemplo-grafana-mcp/alumnus/_alumnus/node_modules/pg-pool/index.js:45:11
-    at async DbLeakyConnectionsScenario.createConnection (file:///Users/erickwendel/Downloads/projetos/ewit/cursos/ia-devs/demos/exemplo-grafana-mcp/alumnus/_alumnus/src/scenarios/db-leaky-connections/main.ts:52:20)
-    at async Object.<anonymous> (file:///Users/erickwendel/Downloads/projetos/ewit/cursos/ia-devs/demos/exemplo-grafana-mcp/alumnus/_alumnus/src/scenarios/db-leaky-connections/main.ts:84:24)
+    at .../node_modules/pg-pool/index.js:45:11
+    at runNextTicks (node:internal/process/task_queues:65:5)
+    at process.processTimers (node:internal/timers:520:9)
+    at async DbLeakyConnectionsScenario.createConnection
+         (src/scenarios/db-leaky-connections/main.ts:52:20)
+    at async Object.<anonymous>
+         (src/scenarios/db-leaky-connections/main.ts:84:24)
 ```
 
-**Log Characteristics:**
-- Service: `alumnus_app_17a4`
-- Severity: `error` (level 17)
-- All requests show identical error pattern
-- Logs include complete trace context (trace_id, span_id)
+### Log Entry Fields
+
+| Field             | Value                                     |
+| ----------------- | ----------------------------------------- |
+| `err_message`     | `timeout exceeded when trying to connect` |
+| `err_type`        | `Error`                                   |
+| `severity_text`   | `error`                                   |
+| `severity_number` | `17`                                      |
+| `scope_name`      | `@opentelemetry/instrumentation-pino`     |
+| Sample `trace_id` | `066d9d19b4960f8475e3ef8e51ecbd21`        |
+| Sample `span_id`  | `b9dc7d058d87ea8d`                        |
+
+> The `trace_id` embedded in each log entry directly links the log line to its corresponding Tempo trace, enabling precise correlation.
 
 ---
 
 ## 3. Traces Analysis (Tempo)
 
-**Trace ID Example:** `f6490c1cc9e8ab2aeb365da9aa0c0511`
+### Error Trace — `59e8b734ec6563e4e0eab6aab38bcd7e` (1008 ms, HTTP 500)
 
-**Span Hierarchy:**
-1. **Root Span** (Client): `GET` - Undici HTTP Client
-   - Duration: **1001.48ms**
-   - Status: ERROR
+```
+[CLIENT]  GET  — Undici HTTP Client                           1008.54 ms  ❌ ERROR
+  └─ [SERVER]  GET /students/db-leaky-connections             1007.91 ms  ❌ ERROR
+       └─ [INTERNAL]  request  (@fastify/otel)                1007.24 ms  ⚠️  500
+            └─ [INTERNAL]  handler - fastify -> @fastify/otel 1007.38 ms  ❌ ERROR
+                 └─ 🔴 EXCEPTION EVENT:
+                      exception.type    = Error
+                      exception.message = timeout exceeded when trying to connect
+                      exception.stacktrace → main.ts:52 / main.ts:84
+```
 
-2. **Server Span**: `GET /students/db-leaky-connections`
-   - Duration: **1000.79ms**
-   - Status: ERROR (500)
-   - Instrumentation: `@opentelemetry/instrumentation-http`
+**Span count: 4** — No database spans present (pool.connect never succeeds).
 
-3. **Request Handler Span**: `request`
-   - Duration: **1000.19ms**
-   - Instrumentation: `@fastify/otel`
+---
 
-4. **Handler Span**: `handler - fastify -> @fastify/otel`
-   - Duration: **1000.24ms**
-   - **Exception Event Captured:**
-     - Type: `Error`
-     - Message: `timeout exceeded when trying to connect`
-     - Full stack trace included
+### Success Trace — `c310292b08f5b4662384dfd0b5c4b93d` (50 ms, HTTP 200)
 
-**Trace Statistics:**
-- Service: `alumnus_app_17a4`
-- Span count per trace: 4 spans
-- Error count per trace: 3 error spans
-- All traces show consistent 1-second timeout pattern
+```
+[CLIENT]  GET  — Undici HTTP Client                      50.74 ms  ✅ OK
+  └─ [SERVER]  GET /students/db-leaky-connections        49.50 ms  ✅ OK
+       └─ [INTERNAL]  request  (@fastify/otel)           48.29 ms  ✅ OK
+            └─ [INTERNAL]  handler - fastify             48.55 ms  ✅ OK
+                 ├─ [CLIENT]  pg.connect                 44.60 ms  ✅ OK
+                 │    ├─ [CLIENT]  dns.lookup              0.42 ms  ✅ OK
+                 │    └─ [INTERNAL]  tcp.connect           0.96 ms  ✅ OK
+                 └─ [CLIENT]  pg.query:SELECT             3.18 ms  ✅ OK
+                      db.statement = "SELECT * FROM students LIMIT 1"
+                      db.system    = postgresql
+                 ❌ NO client.release() span — connection is NEVER returned to pool
+```
+
+**Span count: 8** — Full DB span hierarchy visible, but **missing any connection release span**.
+
+### Critical Comparison
+
+| Attribute               | Error Trace | Success Trace           |
+| ----------------------- | ----------- | ----------------------- |
+| Duration                | 1008 ms     | 50 ms                   |
+| HTTP Status             | 500         | 200                     |
+| DB spans present        | ❌ None     | ✅ pg.connect, pg.query |
+| `client.release()` span | ❌ Absent   | ❌ Absent (leak!)       |
+| Exception event         | ✅ Yes      | ❌ None                 |
+| Error span count        | 3           | 0                       |
+
+> **The absence of a `client.release()` span in the success trace is the smoking gun.** Connections are acquired during the first 2 requests but never returned to the pool. When the 3rd request calls `pool.connect()`, all slots are in use and the pool wait-timeout of 1 second triggers.
 
 ---
 
 ## 4. Root Cause Analysis
 
-### **Primary Issue: Database Connection Pool Exhaustion**
+### Primary Issue: Database Connection Pool Exhaustion (Leak)
 
-**Root Cause File & Line:**
-- **File:** `src/scenarios/db-leaky-connections/main.ts`
-- **Critical Line:** **Line 52** - `DbLeakyConnectionsScenario.createConnection()`
-- **Secondary Issue:** **Line 84** - Calling function
+**Root Cause Location:**
+| | |
+|---|---|
+| **File** | `src/scenarios/db-leaky-connections/main.ts` |
+| **Line 52** | `DbLeakyConnectionsScenario.createConnection()` — `pool.connect()` call |
+| **Line 84** | Route handler — calls `createConnection()` without a `finally` block |
 
-**Technical Analysis:**
+### Technical Explanation
 
-1. **Connection Leak Pattern:**
-   - The error originates from `pg-pool` (PostgreSQL connection pool)
-   - Timeout occurs at line 45 in `pg-pool/index.js`
-   - This indicates the pool has no available connections
+1. **Pool size = 2** — By design, the pool is configured with a maximum of 2 connections.
+2. **Requests 1 and 2** succeed: `pool.connect()` at line 52 returns a client, the query runs, and the response is sent — **but `client.release()` is never called**.
+3. **Both pool slots are now permanently checked out** — the connections are "leaked."
+4. **Request 3+:** `pool.connect()` at line 52 blocks waiting for an available slot for exactly 1 second, then throws:
+   ```
+   Error: timeout exceeded when trying to connect
+   ```
+5. The error propagates up through the handler (line 84) → logged by Pino → recorded as an exception event in the Tempo span → increments the 500 counter in Prometheus.
 
-2. **Scenario Name is Revealing:**
-   - The class is named `DbLeakyConnectionsScenario`
-   - This suggests **intentional demonstration of connection leaks**
-   - Connections are likely being created but never released/closed
+### Signal Chain
 
-3. **Timeout Mechanism:**
-   - Connection pool has a 1-second timeout configured
-   - When all connections are exhausted, new requests wait 1 second then fail
-   - Consistent 1000ms response time confirms timeout threshold
-
-4. **Impact:**
-   - 100% failure rate for endpoint
-   - Service degradation
-   - Resource exhaustion (connections not returned to pool)
-
----
-
-## 5. Correlation Summary
-
-| Telemetry Type | Key Finding | Correlation |
-|----------------|-------------|-------------|
-| **Metrics** | Consistent 1000ms timeouts | Confirms hard timeout limit |
-| **Logs** | "timeout exceeded when trying to connect" | Direct error message correlation |
-| **Traces** | Exception in handler span at line 52 | Pinpoints exact code location |
-| **All Three** | 100% failure on `/students/db-leaky-connections` | Complete service degradation |
-
-**Telemetry Correlation:**
-- **Trace ID:** Links logs and traces together perfectly (e.g., `f6490c1cc9e8ab2aeb365da9aa0c0511`)
-- **Span ID:** Identifies exact operation failing (e.g., `3799b22a3f517316`)
-- **Timestamp:** All three signals align within milliseconds
-- **Error Pattern:** Identical across all observability signals
+```
+pool.connect() called (main.ts:52)
+    ↓ no client.release() ever called
+Pool exhausted after 2 requests
+    ↓
+pool.connect() blocks → 1s timeout → throws Error
+    ↓
+Loki: "timeout exceeded when trying to connect" (err_stack → main.ts:52, main.ts:84)
+    ↓
+Tempo: handler span EXCEPTION event + 3 error spans, 1008ms duration
+    ↓
+Prometheus: http_server_duration_milliseconds_count{status_code="500"} += 1
+            avg latency ≈ 1008ms
+```
 
 ---
 
-## 6. Diagnosis Table
+## 5. Telemetry Correlation Table
 
-| Category | Finding | Evidence |
-|----------|---------|----------|
-| **Endpoint** | `/students/db-leaky-connections` | All datasources |
-| **HTTP Status** | 500 Internal Server Error | Metrics + Traces |
-| **Response Time** | 1000-1003ms (timeout) | Metrics analysis |
-| **Error Type** | Connection pool timeout | Logs + Traces |
-| **Root Cause** | Database connection leak | Stack trace |
-| **File** | `src/scenarios/db-leaky-connections/main.ts` | Exception stacktrace |
-| **Line Number** | Line 52 (createConnection) | Exception stacktrace |
-| **Secondary Line** | Line 84 (caller) | Exception stacktrace |
-| **Pattern** | All requests fail with same timeout | Consistent across all telemetry |
-| **Service** | `alumnus_app_17a4` | Resource attributes |
-| **Runtime** | Node.js 22.13.1 | Trace metadata |
-| **Trace IDs** | 20+ failed traces identified | Tempo search results |
+| Signal              | Key Finding       | Value                                     |
+| ------------------- | ----------------- | ----------------------------------------- |
+| **Prometheus**      | HTTP 200 count    | **2** (fixed — pool size)                 |
+| **Prometheus**      | HTTP 500 count    | **176** (growing at 30/min)               |
+| **Prometheus**      | Avg latency (500) | **~1008 ms** (pool timeout)               |
+| **Loki**            | Error message     | `timeout exceeded when trying to connect` |
+| **Loki**            | Leak location     | `main.ts:52` (createConnection)           |
+| **Loki**            | Caller location   | `main.ts:84` (handler — missing finally)  |
+| **Tempo (error)**   | Span count        | **4** — no DB spans (connect fails)       |
+| **Tempo (success)** | Span count        | **8** — DB spans present, no release span |
+| **Tempo (success)** | Missing span      | **`client.release()`** never observed     |
+| **All signals**     | Trace correlation | `trace_id` links Loki + Tempo exactly     |
+
+---
+
+## 6. Diagnosis Summary
+
+| Category               | Finding                                                                |
+| ---------------------- | ---------------------------------------------------------------------- |
+| **Endpoint**           | `GET /students/db-leaky-connections`                                   |
+| **HTTP Status**        | 500 Internal Server Error                                              |
+| **Response Time**      | ~1008 ms (hard pool timeout)                                           |
+| **Error Type**         | `pg-pool` connection pool exhaustion                                   |
+| **Root Cause**         | `client.release()` never called after `pool.connect()`                 |
+| **Leaking File**       | `src/scenarios/db-leaky-connections/main.ts`                           |
+| **Leaking Line**       | **Line 84** — route handler (missing `finally` block)                  |
+| **Secondary Line**     | **Line 52** — `createConnection()` method                              |
+| **Pool Max Size**      | 2 connections (deduced from: exactly 2 successes before total failure) |
+| **Service**            | `alumnus_app_1d5a`                                                     |
+| **Runtime**            | Node.js 22.17.1                                                        |
+| **Total Error Traces** | 20+ (from Tempo)                                                       |
+| **Error Rate**         | ~100% (after initial 2 requests)                                       |
 
 ---
 
 ## 7. Recommended Fix
 
-**Immediate Action:**
-1. Review `src/scenarios/db-leaky-connections/main.ts` at line 52
-2. Ensure database connections are properly released after use
-3. Implement proper connection cleanup in try-finally blocks
-4. Verify connection pool configuration (max connections, timeout)
+**The problem:** missing `finally` block around the connection usage.
 
-**Code Pattern to Fix:**
 ```typescript
-// Current (leaky):
-const connection = await this.createConnection(); // Line 52
-// Use connection...
-// Missing: connection.release() or connection.end()
+// ❌ CURRENT (leaky) — connection never released
+async function handler(request, reply) {
+  // line 84
+  const client = await this.pool.connect(); // line 52
+  const result = await client.query("SELECT * FROM students LIMIT 1");
+  return reply.send({ students: result.rows });
+  // client.release() is NEVER called — connection stays checked out forever
+}
 
-// Fixed:
-const connection = await this.createConnection();
-try {
-  // Use connection...
-} finally {
-  await connection.release(); // Always release back to pool
+// ✅ FIXED — always releases back to pool
+async function handler(request, reply) {
+  // line 84
+  const client = await this.pool.connect(); // line 52
+  try {
+    const result = await client.query("SELECT * FROM students LIMIT 1");
+    return reply.send({ students: result.rows });
+  } finally {
+    client.release(); // Always returns connection even if query throws
+  }
 }
 ```
 
-**Long-term Improvements:**
-- Implement connection monitoring and alerting
-- Set up connection pool metrics in Prometheus
-- Add circuit breaker pattern for database operations
-- Configure connection pool limits based on load testing
+> The `finally` block guarantees `client.release()` is called regardless of whether the query succeeds or throws. This is the canonical pattern for `pg-pool` usage.
 
 ---
 
-## 8. Investigation Summary
+## 8. Data Sources & Queries Used
 
-### Data Sources Used:
-- **Prometheus:** Metrics and response time analysis
-- **Loki:** Log aggregation and error message extraction
-- **Tempo:** Distributed tracing and span analysis
-
-### Key Correlation Points:
-1. **Trace ID `f6490c1cc9e8ab2aeb365da9aa0c0511`** links:
-   - Loki logs with error details
-   - Tempo trace showing 4 spans with 3 errors
-   - Consistent 1000ms timeout
-
-2. **Stack Trace** appears in:
-   - Loki logs (full error details)
-   - Tempo exception events (structured data)
-   - Both point to same file and line numbers
-
-3. **Timeline Correlation:**
-   - Request arrives: T+0ms
-   - Connection timeout: T+1000ms
-   - Error logged: T+1000ms
-   - Trace completed: T+1001ms
-
----
-
-## Conclusion
-
-The investigation successfully correlated **metrics, logs, and traces** to identify a **database connection leak** in the `/students/db-leaky-connections` endpoint. The issue is located at **`src/scenarios/db-leaky-connections/main.ts:52`**, where database connections are created but never returned to the pool, causing subsequent requests to timeout after 1 second when trying to acquire a connection from the exhausted pool.
-
-This is a critical issue requiring immediate attention as it results in 100% failure rate for the affected endpoint and potential service-wide degradation if the connection pool is shared across endpoints.
-
----
-
-**Report Generated:** January 12, 2026
-**Investigation Method:** Multi-signal observability correlation (Metrics + Logs + Traces)
-**Tools Used:** Grafana, Prometheus, Loki, Tempo
+| Tool           | Query / Resource                                                                       | Purpose                     |
+| -------------- | -------------------------------------------------------------------------------------- | --------------------------- |
+| **Prometheus** | `http_server_duration_milliseconds_count{http_route="/students/db-leaky-connections"}` | Request counts by status    |
+| **Prometheus** | `…_sum / …_count` for `http_status_code="500"`                                         | Avg latency of failures     |
+| **Loki**       | `{service_name="alumnus_app_1d5a"} \| json \| severity_text="error"`                   | Error logs + stack traces   |
+| **Tempo**      | `{ .http.route = "/students/db-leaky-connections" && status = error }`                 | Error trace search          |
+| **Tempo**      | `{ .http.route = "/students/db-leaky-connections" && .http.status_code = 200 }`        | Success trace comparison    |
+| **Tempo**      | Trace `59e8b734ec6563e4e0eab6aab38bcd7e`                                               | Full error span hierarchy   |
+| **Tempo**      | Trace `c310292b08f5b4662384dfd0b5c4b93d`                                               | Full success span hierarchy |
