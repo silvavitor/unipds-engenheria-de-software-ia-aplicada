@@ -1,4 +1,4 @@
-import { z } from 'zod';
+import { z } from 'zod/v3';
 
 export const MessageSchema = z.object({
   message: z.string().min(10).describe('Clear, friendly message for the user')
