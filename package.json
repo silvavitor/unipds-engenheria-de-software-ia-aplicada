@@ -1,0 +1,23 @@
+{
+  "name": "unipds-engenheria-de-software-ia-aplicada",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/silvavitor/unipds-engenheria-de-software-ia-aplicada.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/silvavitor/unipds-engenheria-de-software-ia-aplicada/issues"
+  },
+  "homepage": "https://github.com/silvavitor/unipds-engenheria-de-software-ia-aplicada#readme",
+  "devDependencies": {
+    "@biomejs/biome": "^2.4.16"
+  }
+}
