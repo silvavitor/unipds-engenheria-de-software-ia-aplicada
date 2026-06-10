@@ -1,8 +1,8 @@
-import { describe, it, before, after } from 'node:test';
-import assert from 'node:assert/strict';
 import { HumanMessage } from '@langchain/core/messages';
+import assert from 'node:assert/strict';
+import { existsSync, unlinkSync } from 'node:fs';
+import { after, before, describe, it } from 'node:test';
 import { buildGraph } from '../src/graph/factory.ts';
-import { unlinkSync, existsSync } from 'node:fs';
 
 describe('Chat de Recomendação Musical - Testes E2E', () => {
   let graph: any;
@@ -25,7 +25,7 @@ describe('Chat de Recomendação Musical - Testes E2E', () => {
     }
   });
 
-  it('Deve extrair e salvar preferências do usuário', async () => {
+  it.only('Deve extrair e salvar preferências do usuário', async () => {
     const testThreadId = `test-user-${Date.now()}`;
     const config = {
       configurable: { thread_id: testThreadId },

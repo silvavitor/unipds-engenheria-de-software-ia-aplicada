@@ -1,8 +1,8 @@
+import { HumanMessage, SystemMessage } from '@langchain/core/messages';
 import { ChatOpenAI } from '@langchain/openai';
-import { config, type ModelConfig } from '../config.ts';
-import { SystemMessage, HumanMessage } from '@langchain/core/messages';
-import type { z } from 'zod/v3';
 import { createAgent, providerStrategy } from 'langchain';
+import type { z } from 'zod/v3';
+import { config, type ModelConfig } from '../config.ts';
 
 export type LLMResponse = {
   model: string;
@@ -36,8 +36,8 @@ export class OpenRouterService {
   }
 
   async generateStructured<T>(
-    userPrompt: string,
     systemPrompt: string,
+    userPrompt: string,
     schema: z.ZodSchema<T>,
   ) {
     try {
