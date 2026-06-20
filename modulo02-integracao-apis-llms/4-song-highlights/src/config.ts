@@ -16,9 +16,13 @@ export type ModelConfig = {
   memory: {
     dbUri: string;
   };
+  maxMessagesToSummarize: number;
 };
 
-console.assert(process.env.OPENROUTER_API_KEY, 'OPENROUTER_API_KEY is not set in environment variables');
+console.assert(
+  process.env.OPENROUTER_API_KEY,
+  'OPENROUTER_API_KEY is not set in environment variables'
+);
 
 export const config: ModelConfig = {
   apiKey: process.env.OPENROUTER_API_KEY!,
@@ -38,6 +42,8 @@ export const config: ModelConfig = {
   },
   temperature: 0.7,
   memory: {
-    dbUri: 'postgresql://postgres:mysecretpassword@localhost:5432/song_recommender',
-  }
+    dbUri:
+      'postgresql://postgres:mysecretpassword@localhost:5432/song_recommender',
+  },
+  maxMessagesToSummarize: 6,
 };

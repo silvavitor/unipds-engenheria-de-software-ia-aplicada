@@ -6,6 +6,7 @@ dist/
 .DS_Store
 coverage/
 outputs/
+preferences.db
 
 # LangGraph API
 .langgraph_api

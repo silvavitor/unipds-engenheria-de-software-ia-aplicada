@@ -1,27 +1,38 @@
-import type { Runtime } from "@langchain/langgraph";
-import { AIMessage, HumanMessage } from "langchain";
+import type { Runtime } from '@langchain/langgraph';
+import { AIMessage, HumanMessage } from 'langchain';
+import { config } from '../../config.ts';
 import {
   ChatResponseSchema,
   getSystemPrompt,
   getUserPromptTemplate,
-} from "../../prompts/v1/chatResponse.ts";
-import type { OpenRouterService } from "../../services/openrouterService.ts";
-import type { GraphState } from "../graph.ts";
+} from '../../prompts/v1/chatResponse.ts';
+import type { OpenRouterService } from '../../services/openrouterService.ts';
+import type { PreferencesService } from '../../services/preferencesService.ts';
+import type { GraphState } from '../graph.ts';
 
-export function createChatNode(llmClient: OpenRouterService) {
+export function createChatNode(
+  llmClient: OpenRouterService,
+  preferencesService: PreferencesService
+) {
   return async (
     state: GraphState,
     runtime?: Runtime
   ): Promise<Partial<GraphState>> => {
-    const userContext = "";
+    const userId = String(
+      runtime?.context?.userId || state.userId || 'unknown'
+    );
+    const userContext =
+      state.userContext ||
+      (await preferencesService.getBasicInfo(userId)) ||
+      '';
     const systemPrompt = getSystemPrompt(userContext);
 
     const conversationHistory = state.messages
       .map(
         (msg) =>
-          `${HumanMessage.isInstance(msg) ? "User" : "AI"}: ${msg.content}`
+          `${HumanMessage.isInstance(msg) ? 'User' : 'AI'}: ${msg.content}`
       )
-      .join("\n");
+      .join('\n');
 
     const userMessage = state.messages.at(-1)?.text as string;
 
@@ -34,12 +45,12 @@ export function createChatNode(llmClient: OpenRouterService) {
     );
 
     if (!result.success || !result.data) {
-      console.error("Erro ao gerar resposta estruturada:", result.error);
+      console.error('Erro ao gerar resposta estruturada:', result.error);
 
       return {
         messages: [
           new AIMessage(
-            "Desculpe, ocorreu um erro ao processar sua mensagem. Por favor, tente novamente mais tarde."
+            'Desculpe, ocorreu um erro ao processar sua mensagem. Por favor, tente novamente mais tarde.'
           ),
         ],
       };
@@ -47,12 +58,15 @@ export function createChatNode(llmClient: OpenRouterService) {
 
     const response = result.data;
 
+    const totalMessages = state.messages.length;
+    const needsSummarization = totalMessages > config.maxMessagesToSummarize;
+
     return {
       messages: [new AIMessage(response.message)],
       extractedPreferences: response.shouldSavePreferences
         ? response.preferences
         : undefined,
-      needsSummarization: false,
+      needsSummarization,
     };
   };
 }
