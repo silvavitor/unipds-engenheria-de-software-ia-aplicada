@@ -1,26 +1,50 @@
 import { AIMessage } from 'langchain';
-import { OpenRouterService } from '../../services/openRouterService.ts';
+import {
+  type IntentData,
+  IntentSchema,
+  getSystemPrompt,
+} from '../../prompts/v1/identifyIntent.ts';
+import type { OpenRouterService } from '../../services/openRouterService.ts';
 import type { GraphState } from '../state.ts';
 
 export function intentNode(openRouterService: OpenRouterService) {
-    return async (state: GraphState): Promise<Partial<GraphState>> => {
-        console.log('🧠 Intent node processing...');
-        try {
-            const rawQuestion = state.messages.at(-1)!.text as string;
+  return async (state: GraphState): Promise<Partial<GraphState>> => {
+    console.log('🧠 Intent node processing...');
+    try {
+      const rawQuestion = state.messages.at(-1)!.text as string;
+      const result = await openRouterService.generateStructured(
+        getSystemPrompt(),
+        rawQuestion,
+        IntentSchema
+      );
 
+      const parsed = result.data as IntentData;
+      if (!parsed.intent || !parsed.fileType) {
+        console.log('⚠️ Missing intent or fileType in parsed data:', parsed);
+        throw new Error('Invalid intent data');
+      }
 
-            return {
-                intent: '',
-                fileContent: '{}',
-                fileName: 'report.json',
-            };
+      parsed.fileName ??= `data.${parsed.fileType}`;
 
-        } catch (error) {
-            console.error('Intent node error:', error);
-            return {
-                messages: [new AIMessage('Sorry, I had trouble understanding the intent. Please rephrase your question or provide more details.')],
-                error: error instanceof Error ? error.message : 'Unknown error',
-            };
-        }
-    };
+      console.log('📋 Extracted intent:', parsed.intent);
+      console.log('📄 File Type:', parsed.fileType);
+      console.log('📄 File name:', parsed.fileName);
+
+      return {
+        intent: parsed.intent,
+        fileContent: parsed.fileContent ?? '',
+        fileName: parsed.fileName,
+      };
+    } catch (error) {
+      console.error('Intent node error:', error);
+      return {
+        messages: [
+          new AIMessage(
+            'Sorry, I had trouble understanding the intent. Please rephrase your question or provide more details.'
+          ),
+        ],
+        error: error instanceof Error ? error.message : 'Unknown error',
+      };
+    }
+  };
 }
