@@ -1,29 +1,20 @@
-import {
-  StateGraph,
-  START,
-  END,
-  MessagesZodMeta,
-} from '@langchain/langgraph';
-import { withLangGraph } from "@langchain/langgraph/zod";
-
-import { z } from 'zod/v3';
 import type { BaseMessage } from '@langchain/core/messages';
-
-import { Neo4jService } from '../services/neo4jService.ts';
-import { OpenRouterService } from '../services/openrouterService.ts';
-
-import { createCypherGeneratorNode } from './nodes/cypherGeneratorNode.ts';
-import { createCypherExecutorNode } from './nodes/cypherExecutorNode.ts';
-import { createCypherCorrectionNode } from './nodes/cypherCorrectionNode.ts';
-import { createQueryPlannerNode } from './nodes/queryPlannerNode.ts';
+import { END, MessagesZodMeta, START, StateGraph } from '@langchain/langgraph';
+import { withLangGraph } from '@langchain/langgraph/zod';
+import { z } from 'zod/v3';
+import config from '../config.ts';
+import type { Neo4jService } from '../services/neo4jService.ts';
+import type { OpenRouterService } from '../services/openrouterService.ts';
 import { createAnalyticalResponseNode } from './nodes/analyticalResponseNode.ts';
+import { createCypherCorrectionNode } from './nodes/cypherCorrectionNode.ts';
+import { createCypherExecutorNode } from './nodes/cypherExecutorNode.ts';
+import { createCypherGeneratorNode } from './nodes/cypherGeneratorNode.ts';
 import { createExtractQuestionNode } from './nodes/extractQuestionNode.ts';
+import { createQueryPlannerNode } from './nodes/queryPlannerNode.ts';
 
 const SalesStateAnnotation = z.object({
   // Input
-    messages: withLangGraph(
-      z.custom<BaseMessage[]>(),
-      MessagesZodMeta),
+  messages: withLangGraph(z.custom<BaseMessage[]>(), MessagesZodMeta),
   question: z.string().optional(),
 
   // Cypher generation
@@ -64,9 +55,15 @@ export function buildSalesGraph(
   })
     .addNode('extractQuestion', createExtractQuestionNode())
     .addNode('queryPlanner', createQueryPlannerNode(llmClient))
-    .addNode('cypherGenerator', createCypherGeneratorNode(llmClient, neo4jService))
+    .addNode(
+      'cypherGenerator',
+      createCypherGeneratorNode(llmClient, neo4jService)
+    )
     .addNode('cypherExecutor', createCypherExecutorNode(neo4jService))
-    .addNode('cypherCorrection', createCypherCorrectionNode(llmClient, neo4jService))
+    .addNode(
+      'cypherCorrection',
+      createCypherCorrectionNode(llmClient, neo4jService)
+    )
     .addNode('analyticalResponse', createAnalyticalResponseNode(llmClient))
 
     .addEdge(START, 'extractQuestion')
@@ -80,11 +77,26 @@ export function buildSalesGraph(
     .addEdge('cypherGenerator', 'cypherExecutor')
 
     .addConditionalEdges('cypherExecutor', (state: GraphState) => {
-      if (state.needsCorrection && (!state.correctionAttempts || state.correctionAttempts < 1)) {
+      if (
+        state.needsCorrection &&
+        (!state.correctionAttempts ||
+          state.correctionAttempts < config.maxCorrectionAttempts)
+      ) {
         return 'cypherCorrection';
       }
 
-      if (state.isMultiStep && state.subQuestions && state.currentStep !== undefined) {
+      if (
+        state.correctionAttempts &&
+        state.correctionAttempts >= config.maxCorrectionAttempts
+      ) {
+        return 'analyticalResponse';
+      }
+
+      if (
+        state.isMultiStep &&
+        state.subQuestions &&
+        state.currentStep !== undefined
+      ) {
         if (state.currentStep < state.subQuestions.length) {
           return 'cypherGenerator';
         }
